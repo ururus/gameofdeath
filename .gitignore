@@ -1,0 +1,5 @@
+.cargo/
+target/
+GameOfDeath.app
+/.idea/
+.idea/

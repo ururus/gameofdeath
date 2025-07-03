@@ -1,0 +1,45 @@
+[package]
+name = "gameofdeath"
+version = "0.1.1"
+edition = "2021"
+exclude = ["src/bin/old/**"]
+
+[[bin]]
+name = "gameofdeath"
+path = "src/main.rs"
+
+# All test binaries removed during cleanup
+
+[dependencies]
+# Bevy game engine
+bevy = { version = "0.15", features = ["default"] }
+
+# Using Bevy for game engine and UI
+thiserror = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+log = "0.4"
+env_logger = "0.11"
+rodio = "0.18"
+
+# Modern audio engine (fundsp integration handled separately)
+kira = "0.8"
+fundsp = "0.16"
+
+# Audio dependencies (from audio_requirements.md)
+cpal = "0.15"
+dasp_signal = "0.11"
+dasp_sample = "0.11"
+dasp_ring_buffer = "0.11"
+crossbeam-channel = "0.5"
+atomic_float = "0.1"
+rand = "0.8"
+lazy_static = "1.4"
+
+# [dev-dependencies] - removed benchmarks
+
+[features]
+default = ["wrap", "std"]
+wrap = []  # Toroidal grid edges
+std = []   # Standard library features
