@@ -30,6 +30,13 @@ pub struct HudContainer;
 #[derive(Component)]
 pub struct UiRoot;
 
+// Components for dynamic rule controls (defined in main crate)
+#[derive(Component)]
+pub struct RuleControlsContainer;
+
+#[derive(Component)]
+pub struct RuleControlText;
+
 // UI Resources
 #[derive(Resource)]
 pub struct UiState {
@@ -213,6 +220,17 @@ pub fn setup_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
                     TextColor(Color::srgba(0.8, 0.8, 0.8, 0.9)),
                 ));
             }
+
+            // Empty container for dynamic rule-specific controls
+            parent.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    margin: UiRect::top(Val::Px(8.0)),
+                    align_items: AlignItems::FlexEnd,
+                    ..default()
+                },
+                RuleControlsContainer,
+            ));
         });
     });
 }

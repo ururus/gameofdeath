@@ -745,6 +745,7 @@ impl InfiniteGrid {
 
 /// Some common patterns for testing
 pub mod patterns {
+    use crate::CellState;
 
     /// Create a glider pattern
     pub fn glider() -> impl Iterator<Item = (i32, i32)> {
@@ -773,6 +774,27 @@ pub mod patterns {
             (1, 0),
             (0, 1),
             (1, 1),
+        ].into_iter()
+    }
+
+    /// HighLife Replicator seed (9-cell)
+    pub fn highlife_replicator() -> impl Iterator<Item = (i32, i32)> {
+        vec![
+            (0,0),(1,0),(2,0),
+            (0,1),(2,1),
+            (0,2),(1,2),(2,2),
+            (1,3),
+        ].into_iter()
+    }
+
+    /// WireWorld simple clock (wire + initial electron head)
+    pub fn wire_clock() -> impl Iterator<Item = (i32, i32, CellState)> {
+        // Returns tuples with state; we convert outside
+        vec![
+            // Wire line
+            (-2,0, CellState::Wire),(-1,0, CellState::Wire),(0,0, CellState::Wire),(1,0,CellState::Wire),(2,0,CellState::Wire),
+            // Electron head at left end
+            (-2,0, CellState::ElectronHead),
         ].into_iter()
     }
 } 

@@ -4,7 +4,7 @@ use bevy::{prelude::*, diagnostic::{FrameTimeDiagnosticsPlugin, DiagnosticsStore
 use gameofdeath::*;
 use gameofdeath::camera::{setup_camera, handle_camera_controls, GameCamera, CameraState, world_to_grid, screen_to_world};
 use gameofdeath::start_screen::{GameState, SelectedRule, RuleType, setup_start_screen, handle_start_screen_input, cleanup_start_screen, update_start_screen_ui};
-use gameofdeath::ui::{setup_ui, UiState};
+use gameofdeath::ui::{setup_ui, UiState, RuleControlsContainer, RuleControlText};
 use gameofdeath::cell_renderer::{CellRenderConfig, CellTextureCache, CellTexturePool, render_optimized_cells, update_cell_render_config, animate_cell_textures, CellAnimation, AnimationType};
 use gameofdeath::audio::{
     extract_game_features,
@@ -17,6 +17,7 @@ use gameofdeath::audio::{
     IllbientGroove,
 };
 use gameofdeath::config::{Config, AudioEngine};
+use gameofdeath::GameConfig;
 use gameofdeath::synth_ui::SynthControlPanelPlugin;
 
 /// Custom font resource for the game
@@ -167,22 +168,14 @@ impl Default for AudioCache {
     }
 }
 
-/// Game configuration
+/// Current brush parameters for cell placement
 #[derive(Resource)]
-pub struct GameConfig {
-    pub current_rule: RuleType,
-    pub audio_engine: AudioEngine,
-    pub audio_volume: f32,
+pub struct BrushSettings {
+    pub size: u32, // side length of square brush
 }
 
-impl Default for GameConfig {
-    fn default() -> Self {
-        Self {
-            current_rule: RuleType::Conway,
-            audio_engine: AudioEngine::Spatial,
-            audio_volume: 0.7,
-        }
-    }
+impl Default for BrushSettings {
+    fn default() -> Self { Self { size: 1 } }
 }
 
 fn handle_game_input(
@@ -191,6 +184,7 @@ fn handle_game_input(
     mut grid: ResMut<InfiniteGrid>,
     mut game_state: ResMut<NextState<GameState>>,
     mut game_config: ResMut<GameConfig>,
+    mut brush: ResMut<BrushSettings>,
 ) {
     // Pause/Resume
     if keyboard_input.just_pressed(KeyCode::Space) {
@@ -297,15 +291,27 @@ fn handle_game_input(
             }
         }
     }
+
+    // Brush size controls with [ and ]
+    if keyboard_input.just_pressed(KeyCode::BracketLeft) {
+        brush.size = brush.size.saturating_sub(1).max(1);
+        println!("🖌️ Brush size: {}", brush.size);
+    }
+    if keyboard_input.just_pressed(KeyCode::BracketRight) {
+        brush.size = (brush.size + 1).min(20);
+        println!("🖌️ Brush size: {}", brush.size);
+    }
 }
 
 fn handle_mouse_input(
     mouse_button_input: Res<ButtonInput<MouseButton>>,
+    keyboard_input: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Transform, &OrthographicProjection, &GameCamera), With<GameCamera>>,
     camera_state: Res<CameraState>,
     mut grid: ResMut<InfiniteGrid>,
-    _game_config: Res<GameConfig>,
+    game_config: Res<GameConfig>,
+    brush: Res<BrushSettings>,
 ) {
     // Use pressed() for continuous placement while holding down mouse button
     if mouse_button_input.pressed(MouseButton::Left) || mouse_button_input.pressed(MouseButton::Right) {
@@ -317,14 +323,57 @@ fn handle_mouse_input(
                 let world_pos = screen_to_world(cursor_position, camera_transform, projection, window_size);
                 let (grid_x, grid_y) = world_to_grid(world_pos, &camera_state);
 
+                let shift = keyboard_input.pressed(KeyCode::ShiftLeft) || keyboard_input.pressed(KeyCode::ShiftRight);
+                let alt = keyboard_input.pressed(KeyCode::AltLeft) || keyboard_input.pressed(KeyCode::AltRight);
+
                 if mouse_button_input.pressed(MouseButton::Left) {
-                    grid.set_alive(grid_x, grid_y);
+                    let state = state_for_click(game_config.current_rule, MouseButton::Left, shift, alt);
+                    apply_brush(&mut grid, grid_x, grid_y, brush.size, state);
                 }
                 
                 if mouse_button_input.pressed(MouseButton::Right) {
-                    grid.set_dead(grid_x, grid_y);
+                    let state = state_for_click(game_config.current_rule, MouseButton::Right, shift, alt);
+                    apply_brush(&mut grid, grid_x, grid_y, brush.size, state);
                 }
             }
+        }
+    }
+}
+
+fn apply_brush(grid: &mut InfiniteGrid, cx: i32, cy: i32, size: u32, state: CellState) {
+    let half = (size as i32) / 2;
+    for dy in -half..=half {
+        for dx in -half..=half {
+            grid.set(cx + dx, cy + dy, state);
+        }
+    }
+}
+
+/// Return the cell state that should be written for a click under the given rule.
+/// Left click usually creates, right click either deletes or places an alternate species.
+fn state_for_click(rule: RuleType, button: MouseButton, shift: bool, alt: bool) -> CellState {
+    use MouseButton::{Left, Right};
+    match rule {
+        RuleType::WireWorld => {
+            if shift { CellState::ElectronHead }
+            else if alt { CellState::ElectronTail }
+            else if button == Left { CellState::Wire } else { CellState::Dead }
+        }
+        RuleType::Immigration => {
+            match button {
+                Left => CellState::SpeciesA,
+                Right => CellState::SpeciesB,
+                _ => CellState::Dead,
+            }
+        }
+        // For Brian's Brain a firing cell is represented by Alive
+        RuleType::Brian => {
+            if shift { CellState::Dying }
+            else if button == Left { CellState::Alive } else { CellState::Dead }
+        }
+        _ => {
+            // Default Life-like rules: place Alive, remove on right-click
+            if button == Left { CellState::Alive } else { CellState::Dead }
         }
     }
 }
@@ -542,12 +591,25 @@ fn on_exit_start_screen(game_config: Res<GameConfig>) {
 /// Handle entering playing state
 fn on_enter_playing(
     mut game_config: ResMut<GameConfig>,
+    mut grid: ResMut<InfiniteGrid>,
+    mut game_stats: ResMut<GameStats>,
     selected_rule: Res<SelectedRule>,
 ) {
     // Apply the selected rule from start screen to game config
     game_config.current_rule = selected_rule.current;
     println!("🎯 Applied rule: {} to game", selected_rule.current.name());
     
+    // Ensure no leftover exotic states from a previous game carry over.
+    grid.clear();
+    
+    // Rule-specific speed presets
+    game_stats.update_interval = match game_config.current_rule {
+        RuleType::Seeds => 0.05,
+        RuleType::Coral => 0.1,
+        RuleType::Gnarl => 0.02,
+        _ => 0.2,
+    };
+
     match game_config.audio_engine {
         AudioEngine::DDSP => {
             println!("🎮 Game mode: DDSP neural audio active (placeholder)");
@@ -731,6 +793,143 @@ fn smooth_step(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Adjust cell density and apply slight directional overlaps towards neighbouring connections.
+///
+/// Cells are scaled down uniformly (controlled by `base_scale`) to make the grid visually less dense.
+/// If a neighbouring cell exists along an axis, we extend the sprite slightly in that axis (`overlay_scale`).
+fn adjust_cell_scale_and_overlay(
+    mut cell_query: Query<(&gameofdeath::cell_renderer::CellSprite, &mut Transform, Option<&gameofdeath::CellAnimation>)>,
+    grid: Res<InfiniteGrid>,
+    config: Res<gameofdeath::cell_renderer::CellRenderConfig>,
+) {
+    // Pre-compute factors in world-space (texture is 32×32 px by default)
+    let px_to_world = config.cell_size / 32.0;
+    let base_scale_world = config.base_scale * px_to_world;
+    let overlay_world = config.overlay_scale * px_to_world;
+
+    for (cell, mut transform, anim_opt) in cell_query.iter_mut() {
+        // Skip cells that currently have any running animation to avoid conflicting scale updates.
+        if anim_opt.is_some() {
+            continue;
+        }
+
+        // Determine scaling for this cell
+        let mut scale_x = base_scale_world;
+        let mut scale_y = base_scale_world;
+
+        // Horizontal neighbours
+        if grid.is_alive(cell.x + 1, cell.y) || grid.is_alive(cell.x - 1, cell.y) {
+            scale_x += overlay_world;
+        }
+        // Vertical neighbours
+        if grid.is_alive(cell.x, cell.y + 1) || grid.is_alive(cell.x, cell.y - 1) {
+            scale_y += overlay_world;
+        }
+
+        transform.scale.x = scale_x;
+        transform.scale.y = scale_y;
+        // Keep original Z scale (used for layering) untouched.
+    }
+}
+
+/// Allow quick insertion of demo patterns with number keys 1-5 depending on active rule.
+fn pattern_hotkeys(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    camera_query: Query<&Transform, With<GameCamera>>,
+    camera_state: Res<CameraState>,
+    mut grid: ResMut<InfiniteGrid>,
+    game_config: Res<GameConfig>,
+) {
+    let pos = if let Ok(t) = camera_query.get_single() { t.translation } else { return; };
+    let (cx, cy) = world_to_grid(pos.truncate(), &camera_state);
+
+    if keyboard_input.just_pressed(KeyCode::Digit1) {
+        insert_rule_pattern(1, &game_config, &mut grid, cx, cy);
+    }
+    if keyboard_input.just_pressed(KeyCode::Digit2) {
+        insert_rule_pattern(2, &game_config, &mut grid, cx, cy);
+    }
+    if keyboard_input.just_pressed(KeyCode::Digit3) {
+        insert_rule_pattern(3, &game_config, &mut grid, cx, cy);
+    }
+}
+
+fn insert_rule_pattern(slot: u8, config: &GameConfig, grid: &mut InfiniteGrid, ox: i32, oy: i32) {
+    use gameofdeath::infinite_grid::patterns as pat;
+    match (config.current_rule, slot) {
+        (RuleType::HighLife, 1) => grid.insert_pattern(pat::highlife_replicator(), ox, oy),
+        (RuleType::Conway, 1) => grid.insert_pattern(pat::glider(), ox, oy),
+        (RuleType::Conway, 2) => grid.insert_pattern(pat::blinker(), ox, oy),
+        (RuleType::Conway, 3) => grid.insert_pattern(pat::block(), ox, oy),
+        _ => {}
+    }
+}
+
+/// Dynamically populate the HUD panel with rule-specific controls when the rule changes.
+fn update_rule_controls(
+    game_config: Res<GameConfig>,
+    mut container_query: Query<(Entity, &Children), With<RuleControlsContainer>>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+) {
+    if !game_config.is_changed() {
+        return;
+    }
+
+    let (entity, children) = match container_query.get_single_mut() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Clear existing children
+    for &child in children.iter() {
+        commands.entity(child).despawn_recursive();
+    }
+
+    let lines = rule_specific_controls(game_config.current_rule);
+    if lines.is_empty() { return; }
+
+    let font = asset_server.load("fonts/Geo-Regular.ttf");
+
+    commands.entity(entity).with_children(|parent| {
+        parent.spawn((
+            Text::new("Rule Controls:"),
+            TextFont { font: font.clone(), font_size: 14.0, ..default() },
+            TextColor(Color::rgb(1.0, 0.85, 0.3)),
+            RuleControlText,
+        ));
+        for l in lines {
+            parent.spawn((
+                Text::new(l),
+                TextFont { font: font.clone(), font_size: 14.0, ..default() },
+                TextColor(Color::WHITE),
+                RuleControlText,
+            ));
+        }
+    });
+}
+
+fn rule_specific_controls(rule: RuleType) -> Vec<&'static str> {
+    match rule {
+        RuleType::WireWorld => vec![
+            "LMB: Wire",
+            "Shift+Click: Electron Head",
+            "Alt+Click: Electron Tail",
+            "1: Clock pattern",
+        ],
+        RuleType::Brian => vec![
+            "LMB: Firing cell",
+            "Shift+Click: Dying cell",
+        ],
+        RuleType::Immigration => vec![
+            "LMB: Species A",
+            "RMB: Species B",
+        ],
+        RuleType::HighLife => vec!["1: Replicator seed"],
+        _ => Vec::new(),
+    }
+}
+
 fn main() {
     env_logger::init();
     
@@ -763,6 +962,7 @@ fn main() {
         .init_resource::<CameraState>()
         .init_resource::<CellRenderConfig>()
         .init_resource::<CellTextureCache>()
+        .init_resource::<BrushSettings>()
         .insert_non_send_resource(IllbientGroove::new(100.0))
         .add_plugins(SynthControlPanelPlugin)
         .add_systems(Startup, (setup_kira, setup_camera, setup_ui, setup_font, setup_start_screen_audio))
@@ -794,6 +994,9 @@ fn main() {
                 update_audio_system,
                 gameofdeath::ui::update_ui,
                 gameofdeath::ui::toggle_hud_visibility,
+                adjust_cell_scale_and_overlay,
+                pattern_hotkeys,
+                update_rule_controls,
             )
                 .run_if(in_state(GameState::Playing))
         )

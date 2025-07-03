@@ -32,6 +32,7 @@ pub mod config;
 pub mod io;
 pub mod audio;
 pub mod synth_ui;
+pub mod game_config;
 
 
 
@@ -284,3 +285,5 @@ mod tests {
         assert!(g.is_alive(2, 3));
     }
 }
+
+pub use game_config::GameConfig;
