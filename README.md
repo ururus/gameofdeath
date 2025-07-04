@@ -83,4 +83,59 @@ cargo build --release
 - **Audio Backend**: [Kira](https://kira.synthax.link/) for audio management.
 - **Language**: [Rust](https://www.rust-lang.org/)
 
-The project is structured into several modules, including a dedicated `audio` module for the synthesis engines, `cell_renderer` for the custom visuals, and `synth_ui` for the Bevy UI control panel. 
+The project is structured into several modules, including a dedicated `audio` module for the synthesis engines, `cell_renderer` for the custom visuals, and `synth_ui` for the Bevy UI control panel.
+
+## 🖥️ Cross-Platform Builds
+
+You can build and run Game of Death on both macOS and Windows.
+
+### macOS (native)
+Just run:
+```sh
+cargo build --release
+```
+This produces a native macOS binary in `target/release/gameofdeath`.
+
+### Windows (cross-compile from macOS)
+1. Install the Windows target:
+   ```sh
+   rustup target add x86_64-pc-windows-gnu
+   ```
+2. Install a cross-linker:
+   ```sh
+   brew install mingw-w64
+   ```
+3. Build for Windows:
+   ```sh
+   cargo build --release --target x86_64-pc-windows-gnu
+   ```
+   The output will be in `target/x86_64-pc-windows-gnu/release/gameofdeath.exe`.
+
+**Note:**
+- Cross-compiling GUI apps (like Bevy games) from macOS to Windows can be tricky due to graphics/audio dependencies. The resulting `.exe` may require extra DLLs and may not run on all Windows systems.
+- For best results, build and test on a real Windows machine or VM.
+
+### Windows (native)
+On a Windows machine:
+```sh
+cargo build --release
+```
+This is the most reliable way for GUI apps.
+
+### Cross-platform assets
+- Use lowercase filenames and forward slashes (`/`) for all assets.
+- Avoid macOS-specific file paths or dependencies.
+
+### Packaging
+- On macOS: You can bundle as an `.app` (see your `GameOfDeath.app` folder).
+- On Windows: Zip the `.exe` with the `assets/` folder, or use a tool like [cargo-bundle](https://github.com/burtonageo/cargo-bundle).
+
+### Build Summary Table
+
+| Platform | Command                                                      | Notes                        |
+|----------|--------------------------------------------------------------|------------------------------|
+| macOS    | `cargo build --release`                                      | Native, works out of the box |
+| Windows  | `cargo build --release --target x86_64-pc-windows-gnu`       | Cross-compile, may need DLLs |
+| Windows  | (on Windows) `cargo build --release`                         | Most reliable                |
+
+--- 

@@ -1,9 +1,9 @@
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_asset::RenderAssetUsages;
 use std::collections::HashMap;
-use crate::CellState;
+use crate::{CellState, RuleType};
 use bevy::time::{Timer, TimerMode};
 
 /// Cell rendering component to track sprites
@@ -91,6 +91,10 @@ pub struct CellRenderConfig {
     pub animation_speed: f32,
     /// Frames-per-second for cycling between texture variations (visual refresh rate)
     pub texture_fps: f32,
+    /// Base uniform scale applied to every cell sprite (controls visual density)
+    pub base_scale: f32,
+    /// Additional scale applied along an axis when a neighbouring cell exists in that direction
+    pub overlay_scale: f32,
 }
 
 impl Default for CellRenderConfig {
@@ -103,7 +107,23 @@ impl Default for CellRenderConfig {
             lod_enabled: true,
             animation_speed: 2.0, // 2× faster animations by default
             texture_fps: 24.0,    // swap textures ~24 FPS
+            base_scale: 0.65,     // Roughly 65% of the texture -> leaves some empty space
+            overlay_scale: 0.10,  // Extra 10% stretch towards neighbouring connections
         }
+    }
+}
+
+/// Return a distinct base colour for each cell state for better visual distinction between rules.
+fn base_color_for_state(state: CellState) -> Color {
+    match state {
+        CellState::Alive => Color::WHITE,
+        CellState::Dying => Color::rgb_linear(0.6, 0.3, 0.8),
+        CellState::Wire => Color::rgb_linear(1.0, 0.8, 0.2),          // golden
+        CellState::ElectronHead => Color::rgb_linear(0.2, 0.6, 1.0), // blue
+        CellState::ElectronTail => Color::rgb_linear(1.0, 0.3, 0.3), // red
+        CellState::SpeciesA => Color::rgb_linear(0.1, 0.9, 0.1),     // green
+        CellState::SpeciesB => Color::rgb_linear(0.9, 0.1, 0.9),     // magenta
+        CellState::Dead => Color::BLACK,
     }
 }
 
@@ -119,6 +139,7 @@ pub fn render_optimized_cells(
     mut texture_cache: ResMut<CellTextureCache>,
     mut texture_pool: ResMut<CellTexturePool>,
     mut images: ResMut<Assets<Image>>,
+    game_config: Res<crate::GameConfig>,
 ) {
     if let Ok((camera_transform, _projection, game_camera)) = camera_query.get_single() {
         let window = windows.single();
@@ -156,10 +177,10 @@ pub fn render_optimized_cells(
                 // Check if this position is still alive and add death animation if needed
                 let still_alive = alive_cells.iter().any(|&(x, y)| x == cell_sprite.x && y == cell_sprite.y);
                 if !still_alive && animation.is_none() {
-                    // Only add death animation if the entity doesn't already have one
+                    let death_dur = animation_duration(game_config.current_rule, AnimationType::Death);
                     commands.entity(entity).insert(CellAnimation {
                         animation_type: AnimationType::Death,
-                        timer: Timer::from_seconds(0.2, TimerMode::Once), // 200ms death animation
+                        timer: Timer::from_seconds(death_dur, TimerMode::Once),
                         progress: 0.0,
                     });
                 }
@@ -189,10 +210,11 @@ pub fn render_optimized_cells(
                         texture_cache.simple_texture.as_ref().unwrap().clone()
                     };
 
+                    let birth_dur = animation_duration(game_config.current_rule, AnimationType::Birth);
                     commands.spawn((
                         Sprite {
                             image: cell_texture,
-                            color: Color::WHITE, // Let the texture handle the color
+                            color: base_color_for_state(CellState::Alive),
                             ..default()
                         },
                         Transform::from_translation(Vec3::new(world_x, world_y, 0.0))
@@ -204,7 +226,7 @@ pub fn render_optimized_cells(
                         },
                         CellAnimation {
                             animation_type: AnimationType::Birth,
-                            timer: Timer::from_seconds(0.3, TimerMode::Once), // 300ms birth animation
+                            timer: Timer::from_seconds(birth_dur, TimerMode::Once),
                             progress: 0.0,
                         },
                     ));
@@ -250,7 +272,7 @@ fn create_simple_cell_texture(images: &mut Assets<Image>, size: u32, color: Colo
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
-        Default::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     
     images.add(image)
@@ -275,11 +297,14 @@ pub fn update_cell_render_config(
 
 /// Animate cell textures and evolve them over time
 pub fn animate_cell_textures(
-    mut cell_query: Query<(&mut Sprite, &CellSprite, Option<&CellAnimation>)>,
+    mut cell_query: Query<(Entity, &mut Sprite, &mut CellSprite, Option<&CellAnimation>)>,
+    mut commands: Commands,
     mut texture_pool: ResMut<CellTexturePool>,
     time: Res<Time>,
     config: Res<CellRenderConfig>,
     mut images: ResMut<Assets<Image>>,
+    grid: Res<crate::InfiniteGrid>,
+    game_config: Res<crate::GameConfig>,
 ) {
     // Initialize texture pool if needed
     if !texture_pool.is_initialized {
@@ -340,11 +365,24 @@ pub fn animate_cell_textures(
     let should_update_textures = texture_pool.texture_update_timer.just_finished();
 
     // Update all cell textures and animations
-    for (mut sprite, cell_sprite, animation) in cell_query.iter_mut() {
+    for (entity, mut sprite, mut cell_sprite, animation) in cell_query.iter_mut() {
+        // Sync sprite state with grid
+        let current_state = grid.get(cell_sprite.x, cell_sprite.y);
+        if current_state == crate::CellState::Dead {
+            // remove sprite if underlying cell is now dead (and no death animation)
+            if animation.is_none() {
+                commands.entity(entity).despawn();
+            }
+            continue;
+        }
+        if current_state != cell_sprite.cell_type {
+            cell_sprite.cell_type = current_state;
+        }
+
         // Get appropriate texture based on cell state and animation
         if let Some(texture) = get_dynamic_cell_texture(
             &texture_pool, 
-            cell_sprite.cell_type, 
+            current_state, 
             animation.as_deref(), 
             (cell_sprite.x, cell_sprite.y),
             texture_pool.last_update_time,
@@ -353,42 +391,37 @@ pub fn animate_cell_textures(
             sprite.image = texture;
         }
 
-        // Apply color effects based on animation
+        // Determine the base colour for this cell
+        let base_lin = base_color_for_state(current_state).to_linear();
+
+        // Apply colour effects based on animation, modulating the base colour rather than overriding with greyscale.
         if let Some(anim) = animation {
             let progress = anim.timer.fraction();
             match anim.animation_type {
                 AnimationType::Birth => {
-                    // Bright flash effect during birth with pulsing
+                    // Bright flash effect during birth
                     let pulse = (texture_pool.last_update_time * 12.0).sin() * 0.3 + 1.0;
                     let intensity = (1.0 + (1.0 - progress) * 0.8) * pulse;
-                    sprite.color = Color::linear_rgb(intensity, intensity, intensity);
+                    sprite.color = Color::linear_rgb(base_lin.red * intensity, base_lin.green * intensity, base_lin.blue * intensity);
                 }
                 AnimationType::Death => {
-                    // Fade out effect during death with flicker
+                    // Fade with flicker, keep hue
                     let flicker = (texture_pool.last_update_time * 20.0).sin() * 0.15 + 1.0;
-                    sprite.color = Color::linear_rgba(flicker, flicker, flicker, progress);
+                    sprite.color = Color::linear_rgba(base_lin.red * flicker, base_lin.green * flicker, base_lin.blue * flicker, progress);
                 }
                 AnimationType::Pulse => {
-                    // Enhanced rhythmic pulsing effect
-                    // This creates a pulsing effect by:
-                    // 1. progress * PI * 4.0: Creates 2 complete sine wave cycles (0 to 8π) as animation progresses from 0 to 1
-                    // 2. + texture_pool.last_update_time * 20.0: Adds continuous oscillation at 20 radians per second
-                    // 3. .sin(): Converts to sine wave values between -1 and 1
-                    // 4. * 0.5: Scales amplitude to ±0.5 range
-                    // 5. + 1.0: Shifts range from [0.5, 1.5] so brightness varies from 50% to 150%
                     let pulse = (progress * std::f32::consts::PI * 4.0 + texture_pool.last_update_time * 20.0).sin() * 0.5 + 1.0;
-                    sprite.color = Color::linear_rgb(pulse, pulse, pulse);
+                    sprite.color = Color::linear_rgb(base_lin.red * pulse, base_lin.green * pulse, base_lin.blue * pulse);
                 }
                 AnimationType::Glow => {
-                    // Enhanced glow oscillation with time variation
                     let glow = ((progress * std::f32::consts::PI * 2.0) + (texture_pool.last_update_time * 8.0)).sin() * 0.4 + 1.0;
-                    sprite.color = Color::linear_rgb(glow, glow, glow);
+                    sprite.color = Color::linear_rgb(base_lin.red * glow, base_lin.green * glow, base_lin.blue * glow);
                 }
             }
         } else {
-            // Add more pronounced living pulsing to normal cells
+            // Subtle living pulse with base colour
             let living_pulse = (texture_pool.last_update_time * 3.0 + (cell_sprite.x + cell_sprite.y) as f32 * 0.2).sin() * 0.1 + 1.0;
-            sprite.color = Color::linear_rgb(living_pulse, living_pulse, living_pulse);
+            sprite.color = Color::linear_rgb(base_lin.red * living_pulse, base_lin.green * living_pulse, base_lin.blue * living_pulse);
         }
     }
 }
@@ -465,7 +498,7 @@ fn create_procedural_cell_texture(
             let organic_radius = max_radius * (1.0 + organic_factor * (noise - 0.5));
             
             // Create pulsing effect
-            let pulse = (angle * pulse_frequency).sin() * 0.1 + 1.0;
+            let pulse = (angle * pulse_frequency).sin() * 0.3;
             let effective_radius = organic_radius * pulse;
             
             // Calculate alpha with soft edges
@@ -503,8 +536,8 @@ fn create_procedural_cell_texture(
             TextureDimension::D2,
         data,
             TextureFormat::Rgba8UnormSrgb,
-            bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
-        );
+            RenderAssetUsages::RENDER_WORLD,
+    );
         
         images.add(image)
     }
@@ -690,7 +723,7 @@ fn create_dynamic_cell_texture(
         TextureDimension::D2,
         data,
         TextureFormat::Rgba8UnormSrgb,
-        bevy::render::render_asset::RenderAssetUsages::RENDER_WORLD,
+        RenderAssetUsages::RENDER_WORLD,
     );
     
     images.add(image)
@@ -732,4 +765,30 @@ fn get_dynamic_cell_texture(
     let variation_index = (base_index + time_offset) % texture_set.len();
     
     Some(texture_set[variation_index].clone())
+}
+
+/// Return animation duration in seconds for a given rule and animation type
+fn animation_duration(rule: RuleType, anim: AnimationType) -> f32 {
+    match rule {
+        RuleType::Seeds | RuleType::Gnarl => match anim {
+            AnimationType::Birth => 0.1,
+            AnimationType::Death => 0.1,
+            _ => 0.25,
+        },
+        RuleType::Brian => match anim {
+            AnimationType::Birth => 0.15,
+            AnimationType::Death => 0.05,
+            _ => 0.2,
+        },
+        RuleType::WireWorld => match anim {
+            AnimationType::Birth => 0.05,
+            AnimationType::Death => 0.1,
+            _ => 0.15,
+        },
+        _ => match anim {
+            AnimationType::Birth => 0.3,
+            AnimationType::Death => 0.2,
+            _ => 0.25,
+        },
+    }
 } 
