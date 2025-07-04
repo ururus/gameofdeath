@@ -1,4 +1,5 @@
 use bevy::{prelude::*, diagnostic::{FrameTimeDiagnosticsPlugin, DiagnosticsStore}, window::PrimaryWindow};
+use std::collections::HashSet;
 
 // Import our modules
 use gameofdeath::*;
@@ -176,6 +177,38 @@ pub struct BrushSettings {
 
 impl Default for BrushSettings {
     fn default() -> Self { Self { size: 1 } }
+}
+
+#[derive(Resource, Default)]
+pub struct OverlayCache {
+    version: u64,
+    horiz: HashSet<(i32, i32)>,
+    vert: HashSet<(i32, i32)>,
+}
+
+impl OverlayCache {
+    /// Recompute overlay flags when the grid has changed
+    fn recompute(&mut self, grid: &InfiniteGrid) {
+        // Clear existing data while keeping capacity
+        self.horiz.clear();
+        self.vert.clear();
+
+        // Take a snapshot of all alive positions to avoid borrow conflicts
+        let positions = grid.get_alive_cells_snapshot();
+        for &(x, y) in &positions {
+            // Check right neighbour once (left handled when we reach that cell)
+            if grid.is_alive(x + 1, y) {
+                self.horiz.insert((x, y));
+                self.horiz.insert((x + 1, y));
+            }
+            // Check upper neighbour once (bottom handled when we reach that cell)
+            if grid.is_alive(x, y + 1) {
+                self.vert.insert((x, y));
+                self.vert.insert((x, y + 1));
+            }
+        }
+        self.version = grid.version();
+    }
 }
 
 fn handle_game_input(
@@ -706,6 +739,7 @@ fn animate_cells(
     mut commands: Commands,
     camera_query: Query<&crate::camera::GameCamera>,
     game_stats: Res<GameStats>,
+    config: Res<gameofdeath::cell_renderer::CellRenderConfig>,
 ) {
     // Get zoom level for animation LOD
     let zoom = camera_query
@@ -725,47 +759,31 @@ fn animate_cells(
         let delta_scaled = time.delta().mul_f32(speed_multiplier);
         animation.timer.tick(delta_scaled);
         
-        let progress = animation.timer.fraction();
-        animation.progress = progress;
-        
+        // Determine base scale in world units (same calculation as cell_renderer::adjust_cell_scale_and_overlay)
+        let px_to_world = config.cell_size / 32.0;
+        let base_scale_world = config.base_scale * px_to_world;
+
         match animation.animation_type {
             AnimationType::Birth => {
-                if use_simple_animation {
-                    // Simple instant appear when zoomed out
-                    transform.scale = Vec3::splat(1.0);
-                    if animation.timer.finished() {
-                        // Remove animation component when done
-                        commands.entity(entity).remove::<CellAnimation>();
-                    }
-                } else {
-                    // Smooth scale-up when zoomed in
-                    let scale = smooth_step(progress);
-                    transform.scale = Vec3::splat(scale);
-                    
-                    if animation.timer.finished() {
-                        transform.scale = Vec3::splat(1.0);
-                        commands.entity(entity).remove::<CellAnimation>();
-                    }
+                let progress = animation.timer.fraction();
+                transform.scale = Vec3::splat(base_scale_world * progress);
+                if animation.timer.finished() {
+                    // Restore to the base scale when animation ends
+                    transform.scale = Vec3::splat(base_scale_world);
+                    commands.entity(entity).remove::<CellAnimation>();
                 }
             }
             AnimationType::Death => {
-                if use_simple_animation {
-                    // Simple instant disappear when zoomed out
+                let progress = 1.0 - animation.timer.fraction();
+                transform.scale = Vec3::splat(base_scale_world * progress);
+                if animation.timer.finished() {
                     commands.entity(entity).despawn();
-                } else {
-                    // Smooth fade-out when zoomed in
-                    let scale = 1.0 - smooth_step(progress);
-                    transform.scale = Vec3::splat(scale);
-                    
-                    if animation.timer.finished() {
-                        commands.entity(entity).despawn();
-                    }
                 }
             }
             AnimationType::Pulse => {
                 // Continuous pulsing animation
-                let pulse = (progress * std::f32::consts::PI * 4.0).sin().abs();
-                let scale = 0.8 + pulse * 0.4; // Pulse between 0.8 and 1.2
+                let pulse = (animation.timer.fraction() * std::f32::consts::PI * 4.0).sin().abs();
+                let scale = 0.9 + pulse * 0.3; // Pulse between 0.9 and 1.1 (smaller)
                 transform.scale = Vec3::splat(scale);
                 
                 // Reset timer for continuous pulsing
@@ -775,8 +793,8 @@ fn animate_cells(
             }
             AnimationType::Glow => {
                 // Glow animation with color changes (handled via transform for now)
-                let glow = (progress * std::f32::consts::PI * 2.0).sin().abs();
-                let scale = 1.0 + glow * 0.2; // Subtle glow effect
+                let glow = (animation.timer.fraction() * std::f32::consts::PI * 2.0).sin().abs();
+                let scale = 1.0 + glow * 0.13; // Subtle glow effect (smaller)
                 transform.scale = Vec3::splat(scale);
                 
                 // Reset timer for continuous glowing
@@ -801,7 +819,13 @@ fn adjust_cell_scale_and_overlay(
     mut cell_query: Query<(&gameofdeath::cell_renderer::CellSprite, &mut Transform, Option<&gameofdeath::CellAnimation>)>,
     grid: Res<InfiniteGrid>,
     config: Res<gameofdeath::cell_renderer::CellRenderConfig>,
+    mut cache: ResMut<OverlayCache>,
 ) {
+    // Recompute overlay cache only if the grid changed since last calculation
+    if cache.version != grid.version() {
+        cache.recompute(&grid);
+    }
+
     // Pre-compute factors in world-space (texture is 32×32 px by default)
     let px_to_world = config.cell_size / 32.0;
     let base_scale_world = config.base_scale * px_to_world;
@@ -813,22 +837,19 @@ fn adjust_cell_scale_and_overlay(
             continue;
         }
 
-        // Determine scaling for this cell
         let mut scale_x = base_scale_world;
         let mut scale_y = base_scale_world;
 
-        // Horizontal neighbours
-        if grid.is_alive(cell.x + 1, cell.y) || grid.is_alive(cell.x - 1, cell.y) {
+        if cache.horiz.contains(&(cell.x, cell.y)) {
             scale_x += overlay_world;
         }
-        // Vertical neighbours
-        if grid.is_alive(cell.x, cell.y + 1) || grid.is_alive(cell.x, cell.y - 1) {
+        if cache.vert.contains(&(cell.x, cell.y)) {
             scale_y += overlay_world;
         }
 
         transform.scale.x = scale_x;
         transform.scale.y = scale_y;
-        // Keep original Z scale (used for layering) untouched.
+        // Keep original Z scale untouched.
     }
 }
 
@@ -950,6 +971,7 @@ fn main() {
         .init_resource::<GameStats>()
         .init_resource::<AudioEnabled>()
         .init_resource::<AudioCache>()
+        .init_resource::<OverlayCache>()
         .init_resource::<CellTexturePool>()
         .insert_resource(GameConfig {
             current_rule: RuleType::Conway,
@@ -986,10 +1008,11 @@ fn main() {
                 handle_game_input,
                 update_simulation,
                 handle_mouse_input,
+                // Ensure cell animations/despawns happen after rendering logic to avoid race conditions.
                 render_optimized_cells,
-                animate_cell_textures,
-                update_cell_render_config,
-                animate_cells,
+                animate_cell_textures.after(render_optimized_cells),
+                update_cell_render_config.after(render_optimized_cells),
+                animate_cells.after(render_optimized_cells),
                 update_game_ui,
                 update_audio_system,
                 gameofdeath::ui::update_ui,
