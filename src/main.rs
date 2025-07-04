@@ -305,7 +305,7 @@ fn handle_game_input(
 
 fn handle_mouse_input(
     mouse_button_input: Res<ButtonInput<MouseButton>>,
-    keyboard_input: Res<ButtonInput<KeyCode>>,
+    keyboard_input: Res<Input<KeyCode>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Transform, &OrthographicProjection, &GameCamera), With<GameCamera>>,
     camera_state: Res<CameraState>,
